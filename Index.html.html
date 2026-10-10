@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Read-only Sports Market Dashboard</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--panel:#151d31;--muted:#9ba9c4;--text:#f3f6ff;--line:#2b3650;--green:#53d6a0;--red:#ff7f87;--blue:#8eb6ff}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px -apple-system,BlinkMacSystemFont,Segoe UI,sans-serif}
+header{padding:22px 16px 14px;background:linear-gradient(135deg,#172647,#0b1020);border-bottom:1px solid var(--line)}
+h1{font-size:22px;margin:0 0 7px}p{margin:5px 0;color:var(--muted);line-height:1.45}.wrap{max-width:1000px;margin:auto;padding:14px}
+.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0 14px}
+select,button{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:11px;font-size:14px}
+button{cursor:pointer}button.primary{background:#294a85;border-color:#4166a4}
+.status{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;padding:10px 0}
+.dot{width:9px;height:9px;border-radius:50%;background:#f0b85b;display:inline-block}.dot.live{background:var(--green)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;min-width:0}
+.card h2{font-size:16px;line-height:1.35;margin:0 0 8px}.sub{font-size:12px;color:var(--muted);margin-bottom:12px}
+.outcome{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 0;border-top:1px solid var(--line)}
+.name{overflow-wrap:anywhere}.price{font-variant-numeric:tabular-nums;font-weight:700;font-size:17px}
+.spark{width:100%;height:52px;display:block;margin-top:8px}.empty{border:1px dashed var(--line);padding:22px;border-radius:12px;color:var(--muted);line-height:1.5}
+.small{font-size:12px;color:var(--muted);margin-top:14px}.up{color:var(--green)}.down{color:var(--red)}
+a{color:var(--blue)}footer{padding:18px 0 30px;color:var(--muted);font-size:12px;line-height:1.5}
+</style>
+</head>
+<body>
+<header><div class="wrap" style="padding:0 14px">
+<h1>Sports Market Live Tracker</h1>
+<p>Read-only public data · No wallet · No deposits · No trading</p>
+<div class="status"><span id="dot" class="dot"></span><span id="status">Starting data connection…</span></div>
+</div></header>
+<main class="wrap">
+<div class="toolbar">
+<select id="sport" aria-label="Sport">
+<option value="all">All sports</option><option value="football">Football / Soccer</option><option value="basketball">Basketball</option><option value="baseball">Baseball</option><option value="hockey">Hockey</option><option value="tennis">Tennis</option><option value="cricket">Cricket</option>
+</select>
+<button class="primary" id="refresh">Refresh markets</button>
+<button id="reconnect">Reconnect live feed</button>
+</div>
+<p id="updated">Waiting for first update…</p>
+<div id="cards" class="grid"><div class="empty">Loading active public markets. If no sports markets appear, try another sport filter or refresh.</div></div>
+<div class="small">Prices are displayed as percentages where the public API provides probability-style prices. Updates depend on market activity, endpoint availability, and your connection. This dashboard is informational only and does not bypass regional restrictions.</div>
+<footer>Data sources: Polymarket public Gamma API and public CLOB WebSocket. Market availability and permitted access depend on your location and applicable rules.</footer>
+</main>
+<script>
+const API='https://gamma-api.polymarket.com/events?active=true&closed=false&limit=100&order=volume24hr&ascending=false';
+const WS='wss://ws-subscriptions-clob.polymarket.com/ws/market';
+const sports={
+ football:/football|soccer|premier league|champions league|la liga|serie a|bundesliga|mls|uefa|fifa|epl/i,
+ basketball:/basketball|nba|wnba|ncaa basketball/i,
+ baseball:/baseball|mlb/i,hockey:/hockey|nhl/i,tennis:/tennis|atp|wta/i,cricket:/cricket|ipl|test match|t20/i
+};
+let events=[], socket=null, tokenToOutcome={}, histories={}, reconnectTimer=null;
+const $=id=>document.getElementById(id);
+function setStatus(s,live=false){$('status').textContent=s;$('dot').className='dot'+(live?' live':'')}
+function arr(v){if(Array.isArray(v))return v;try{return JSON.parse(v||'[]')}catch{return []}}
+function tokensFor(m){return arr(m.clobTokenIds||m.clob_token_ids)}
+function outcomesFor(m){return arr(m.outcomes)}
+function pricesFor(m){return arr(m.outcomePrices||m.outcome_prices)}
+function isSport(e,filter){
+ const txt=[e.title,e.slug,e.description,...(e.tags||[]).map(t=>typeof t==='string'?t:(t.label||t.slug||''))].join(' ');
+ if(filter!=='all')return sports[filter]?.test(txt)||false;
+ return Object.values(sports).some(r=>r.test(txt));
+}
+function pct(v){let n=Number(v);return Number.isFinite(n)?(n*100).toFixed(1)+'%':'—'}
+function safe(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function filteredEvents(){let f=$('sport').value;return events.filter(e=>isSport(e,f))}
+function render(){
+ const chosen=filteredEvents(), cards=$('cards');
+ const usable=[];
+ for(const e of chosen){
+  for(const m of (e.markets||[])){
+   const outs=outcomesFor(m), ps=pricesFor(m), ids=tokensFor(m);
+   if(!outs.length||!ids.length)continue;
+   usable.push({e,m,outs,ps,ids});
+   if(usable.length>=36)break;
+  }
+  if(usable.length>=36)break;
+ }
+ if(!usable.length){cards.innerHTML='<div class="empty">No matching sports markets found in the first batch of active events. Tap Refresh markets, choose “All sports,” or try a different sport. The public API may not classify every sports event consistently.</div>';return}
+ cards.innerHTML=usable.map(({e,m,outs,ps,ids},i)=>{
+  let rows=outs.map((o,j)=>`<div class="outcome"><span class="name">${safe(o)}</span><span class="price" id="p-${safe(ids[j]||'x')}">${pct(ps[j])}</span></div>`).join('');
+  return `<article class="card"><h2>${safe(m.question||m.groupItemTitle||e.title||'Sports market')}</h2><div class="sub">${safe(e.title||'')} · ${m.closed?'Closed':'Active'}</div>${rows}<canvas class="spark" id="chart-${i}" width="320" height="52" data-token="${safe(ids[0]||'')}"></canvas><div class="sub">Price movement from updates received in this session</div><p><a href="https://polymarket.com/event/${encodeURIComponent(e.slug||'')}" target="_blank" rel="noopener">View market page ↗</a></p></article>`;
+ }).join('');
+ // index each outcome token to its rendered price element and seed mini-history
+ usable.forEach(({m,outs,ps,ids})=>ids.forEach((id,j)=>{
+   if(!id)return;
+   tokenToOutcome[id]={label:outs[j],market:m};
+   const v=Number(ps[j]);if(Number.isFinite(v)){histories[id]=histories[id]||[];if(!histories[id].length)histories[id].push(v);}
+ }));
+ drawCharts();
+ subscribeTokens();
+}
+function drawCharts(){
+ document.querySelectorAll('canvas.spark').forEach(c=>{
+  const id=c.dataset.token,ctx=c.getContext('2d'),vals=(histories[id]||[]).slice(-40);
+  ctx.clearRect(0,0,c.width,c.height);if(vals.length<2)return;
+  const min=Math.min(...vals),max=Math.max(...vals),range=max-min||0.01;
+  ctx.beginPath();
+  vals.forEach((v,i)=>{const x=4+i*(c.width-8)/(vals.length-1),y=c.height-5-(v-min)/range*(c.height-10);i?ctx.lineTo(x,y):ctx.moveTo(x,y)});
+  ctx.strokeStyle='#8eb6ff';ctx.lineWidth=2;ctx.stroke();
+ });
+}
+async function loadMarkets(){
+ setStatus('Loading public market data…');
+ try{
+  const r=await fetch(API,{headers:{'accept':'application/json'},cache:'no-store'});
+  if(!r.ok)throw new Error('API returned HTTP '+r.status);
+  events=await r.json();
+  if(!Array.isArray(events))throw new Error('Unexpected API response');
+  render();$('updated').textContent='Markets refreshed: '+new Date().toLocaleTimeString();
+  setStatus('Market list loaded · connecting to live updates…');
+ }catch(e){setStatus('Could not load market list: '+e.message);$('cards').innerHTML='<div class="empty">The browser could not fetch public market data. Check your connection or try again later. This may be a browser/network restriction.</div>'}
+}
+function subscribeTokens(){
+ if(!socket||socket.readyState!==WebSocket.OPEN)return;
+ const ids=Object.keys(tokenToOutcome);
+ if(ids.length)socket.send(JSON.stringify({assets_ids:ids,type:'market',custom_feature_enabled:true}));
+}
+function connect(){
+ if(socket){try{socket.onclose=null;socket.close()}catch{}}
+ setStatus('Connecting to public live feed…');
+ try{
+  socket=new WebSocket(WS);
+  socket.onopen=()=>{setStatus('Live feed connected',true);subscribeTokens();};
+  socket.onmessage=ev=>{
+   if(ev.data==='PONG')return;
+   let d;try{d=JSON.parse(ev.data)}catch{return}
+   const updates=d.price_changes||[d];
+   updates.forEach(u=>{
+    const id=u.asset_id||u.assetId;if(!id||!tokenToOutcome[id])return;
+    const raw=u.price??u.last_trade_price;if(raw==null)return;
+    const n=Number(raw);if(!Number.isFinite(n))return;
+    histories[id]=histories[id]||[];histories[id].push(n);if(histories[id].length>80)histories[id].shift();
+    const el=document.getElementById('p-'+id);
+    if(el){el.textContent=pct(n);el.className='price '+(u.side==='BUY'?'up':u.side==='SELL'?'down':'');}
+    drawCharts();$('updated').textContent='Last live price update: '+new Date().toLocaleTimeString();
+   });
+  };
+  socket.onerror=()=>setStatus('Live feed connection issue; retrying may help');
+  socket.onclose=()=>{setStatus('Live feed disconnected · retrying in 5 seconds');clearTimeout(reconnectTimer);reconnectTimer=setTimeout(connect,5000)};
+  // Public market channel heartbeat
+  const heartbeat=setInterval(()=>{if(socket&&socket.readyState===WebSocket.OPEN)socket.send('PING');else clearInterval(heartbeat)},10000);
+ }catch(e){setStatus('WebSocket unavailable in this browser');}
+}
+$('refresh').addEventListener('click',loadMarkets);
+$('reconnect').addEventListener('click',()=>{connect();loadMarkets()});
+$('sport').addEventListener('change',render);
+loadMarkets().then(connect);
+setInterval(loadMarkets,60000);
+</script>
+</body>
+</html>
